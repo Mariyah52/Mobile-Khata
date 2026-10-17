@@ -1,0 +1,16 @@
+{
+  "name": "Mobile Khata",
+  "short_name": "Mobile Khata",
+  "description": "Quotations, invoices, stock, payments and ledgers for your business, on your phone.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F7F4FC",
+  "theme_color": "#C9BDF2",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

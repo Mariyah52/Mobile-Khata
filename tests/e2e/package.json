@@ -1,0 +1,7 @@
+{
+  "name": "mobile-khata-e2e",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node mobile-khata.e2e.mjs http://127.0.0.1:5300/ ./screenshots" },
+  "devDependencies": { "playwright": "1.55.0" }
+}

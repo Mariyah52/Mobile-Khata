@@ -1,0 +1,32 @@
+# Runs the Mobile Khata end-to-end test automatically on every push and pull request.
+# It uses demo mode with offline Firebase stand-ins, so no real data or keys are touched.
+name: Mobile Khata automated test
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install test tools
+        working-directory: tests/e2e
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+      - name: Start the app locally
+        run: (cd public && python3 -m http.server 5300 &) && sleep 2
+      - name: Run the test
+        working-directory: tests/e2e
+        run: npm test
+      - name: Save screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-khata-screenshots
+          path: tests/e2e/screenshots

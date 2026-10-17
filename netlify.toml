@@ -1,0 +1,9 @@
+# Mobile Khata on Netlify: the app is a static site in the public folder.
+[build]
+  publish = "public"
+  command = ""
+
+[[headers]]
+  for = "/index.html"
+  [headers.values]
+    Cache-Control = "no-cache"
