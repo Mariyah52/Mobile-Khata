@@ -12,4 +12,5 @@ export function enableIndexedDbPersistence(){return Promise.resolve({exists:()=>
 export function query(){return {};}
 export function orderBy(){return {};}
 export function limit(){return {};}
-export function startAfter(){return {};}
+export function startAfter(){return {};}export function runTransaction(){return Promise.resolve(1);}
+export function where(){return {};}

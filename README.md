@@ -7,7 +7,7 @@ Works on phone and computer, and offline (data syncs when back online).
 - Frontend: `public/index.html` (single page app), hosted on Firebase Hosting (project `mobile-khata-b9eb5`)
 - Database and login: Firebase (Firestore + Authentication)
 - Security rules: `firestore.rules`
-- Automated test: `tests/e2e` (runs on every push, see the Actions tab)
+- Automated tests (run on every push, see the Actions tab): `tests/e2e` (app flows) and `firestore.rules.test.js` (security rules, in the Firebase emulator)
 
 ## First-time setup
 1. Create a Firebase project, enable Email/Password sign-in and Firestore.
