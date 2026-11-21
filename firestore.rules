@@ -191,6 +191,23 @@ service cloud.firestore {
         && memberRole(companyId) in ['owner','admin'];
     }
 
+    // ── /companies/{companyId}/counters/{prefix} — collision-safe document numbering ──
+    // Advanced inside a client transaction when a document is first saved, so
+    // two people saving at the same moment can never receive the same number.
+    // Counters may only grow, hold nothing but the number, and any active
+    // non-viewer member of a trial/active company may advance them.
+    match /companies/{companyId}/counters/{prefix} {
+      allow read: if isMember(companyId);
+      allow create, update: if isMember(companyId)
+        && companyWriteAllowed(companyId)
+        && memberRole(companyId) != 'viewer'
+        && prefix in ['QT','DC','INV','STI','CB','PO']
+        && request.resource.data.keys().hasOnly(['n','updatedAt'])
+        && request.resource.data.n is int
+        && request.resource.data.n > (resource == null ? 0 : resource.data.n);
+      allow delete: if false;
+    }
+
     // ── /companies/{companyId}/auditlogs/{logId} — server-side activity trail ──
     // Any active member may log their own action; only owner/admin can read
     // the company's full history; entries are immutable once written.
@@ -239,7 +256,18 @@ service cloud.firestore {
     // Admin can read all.
     match /paymentSubmissions/{subId} {
       allow read: if isSuperAdmin() || (signedIn() && isMember(resource.data.companyId));
-      allow create: if signedIn() && isMember(request.resource.data.companyId) && request.resource.data.status == 'pending';
+      // The document ID IS the normalised transaction ID ("txn_<id>"), so a
+      // transaction ID can only ever be submitted once: a second submit of the
+      // same ID is an update of an existing doc, which only Super Admin may do.
+      allow create: if signedIn() && isMember(request.resource.data.companyId)
+        && request.resource.data.status == 'pending'
+        && subId.matches('^txn_[a-z0-9]{6,40}$')
+        && request.resource.data.txnKey == subId
+        && request.resource.data.submittedBy == request.auth.uid
+        && request.resource.data.plan in ['starter','business']
+        && request.resource.data.amount is number && request.resource.data.amount > 0
+        && request.resource.data.method in ['EasyPaisa','JazzCash','Bank Transfer']
+        && request.resource.data.keys().hasOnly(['companyId','companyName','plan','amount','method','transactionId','txnKey','note','status','submittedBy','submittedByEmail','createdAt']);
       allow update: if isSuperAdmin();
       allow delete: if false;
     }

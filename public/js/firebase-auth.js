@@ -1,5 +1,5 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import { getFirestore, collection, collectionGroup, doc, getDoc, getDocFromServer, getDocs, setDoc, deleteDoc, onSnapshot, enableIndexedDbPersistence, query, orderBy, limit, startAfter } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+import { getFirestore, collection, collectionGroup, doc, getDoc, getDocFromServer, getDocs, setDoc, deleteDoc, onSnapshot, runTransaction, enableIndexedDbPersistence, query, orderBy, limit, startAfter, where } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, sendEmailVerification, sendPasswordResetEmail, setPersistence, browserLocalPersistence, browserSessionPersistence, onAuthStateChanged, signOut as fbOut } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 
 const COLS=['quotations','challans','invoices','salestaxinvoices','commercialbills','purchases','customers','suppliers','products','payments','expenses','bankaccounts','settings'];
@@ -35,6 +35,55 @@ window.saveConfig=()=>{
   setCfg(cfg);location.reload();
 };
 window.useDemo=()=>{localStorage.setItem('mk_demo','1');_demo=true;document.getElementById('setupWiz').style.display='none';launchApp(null);};
+
+// Collision-safe document numbers: a per-company counter document that is
+// advanced inside a Firestore transaction, so two people saving at the same
+// moment on different devices can never receive the same number.
+// `floor` seeds the counter from the highest number already seen locally
+// (so existing companies carry on from where they were). Returns the
+// reserved integer, or null when offline / not signed in — the caller then
+// falls back to the local counter.
+window.reserveDocNumber=async function(typePrefix,floor){
+  if(_demo||!db||!CURRENT_COMPANY_ID)return null;
+  const ref=doc(db,'companies',CURRENT_COMPANY_ID,'counters',typePrefix);
+  const work=runTransaction(db,async tx=>{
+    const snap=await tx.get(ref);
+    const cur=snap.exists()?(Number(snap.data().n)||0):0;
+    const n=Math.max(cur,Number(floor)||0)+1;
+    tx.set(ref,{n,updatedAt:new Date().toISOString()});
+    return n;
+  });
+  try{return await Promise.race([work,new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),5000))]);}
+  catch(e){console.warn('reserveDocNumber failed, using local counter',e&&e.code||e);return null;}
+};
+
+// ── Subscription payments (manual EasyPaisa / JazzCash / bank transfer) ──
+// The document ID is the normalised transaction ID, so the same transaction
+// ID can never be submitted twice (enforced by firestore.rules, not just here).
+window.submitPaymentProof=async function(p){
+  if(!db||!CURRENT_COMPANY_ID)return{ok:false,error:'Not signed into a company.'};
+  const norm=String(p.transactionId||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+  if(norm.length<6||norm.length>40)return{ok:false,error:'Transaction ID must be 6–40 letters/numbers.'};
+  const key='txn_'+norm;
+  const c=window.COMPANY_ACCOUNT||{};
+  const data={companyId:CURRENT_COMPANY_ID,companyName:String(c.name||c.companyName||CURRENT_COMPANY_ID),plan:p.plan,amount:Number(p.amount),method:p.method,
+    transactionId:String(p.transactionId).trim(),txnKey:key,note:String(p.note||'').slice(0,300),status:'pending',
+    submittedBy:_uid,submittedByEmail:(auth&&auth.currentUser&&auth.currentUser.email)||'',createdAt:new Date().toISOString()};
+  try{await setDoc(doc(db,'paymentSubmissions',key),data);return{ok:true};}
+  catch(e){
+    if(e&&e.code==='permission-denied')return{ok:false,duplicate:true,error:'This transaction ID has already been submitted. If you made a new payment, use its own transaction ID, or contact support.'};
+    return{ok:false,error:(e&&(e.code||e.message))||'Could not submit'};
+  }
+};
+window.loadMyPayments=async function(){
+  if(!db||!CURRENT_COMPANY_ID){window.MY_PAYMENTS=[];return;}
+  try{
+    const snap=await getDocs(query(collection(db,'paymentSubmissions'),where('companyId','==',CURRENT_COMPANY_ID),limit(50)));
+    window.MY_PAYMENTS=snap.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>String(b.createdAt).localeCompare(String(a.createdAt)));
+  }catch(e){console.warn('loadMyPayments',e);window.MY_PAYMENTS=[];}
+  try{const cs=await getDoc(doc(db,'platform','config'));window.BILLING_CFG=cs.exists()?cs.data():{};}catch{window.BILLING_CFG={};}
+  if(window.renderApp)window.renderApp();
+};
 
 async function boot(){
   window.fetchSupportNumberFresh=async function(){
@@ -351,7 +400,12 @@ window.saApprovePayment=async function(subId){
     const subSnap=await getDoc(doc(db,'paymentSubmissions',subId));
     if(!subSnap.exists())return toast('❌ Submission not found');
     const sub=subSnap.data();
-    const newExpiry=new Date(Date.now()+30*86400000).toISOString(); // 30-day cycle from approval
+    if(sub.status!=='pending')return toast('This payment was already '+sub.status);
+    // 30 days from approval — or from the current expiry if the company is already active and paid up
+    const cSnap=await getDoc(doc(db,'companies',sub.companyId));
+    const cur=cSnap.exists()?cSnap.data():{};
+    const baseMs=(cur.status==='active'&&cur.trialEndsAt&&new Date(cur.trialEndsAt).getTime()>Date.now())?new Date(cur.trialEndsAt).getTime():Date.now();
+    const newExpiry=new Date(baseMs+30*86400000).toISOString();
     await setDoc(doc(db,'companies',sub.companyId),{status:'active',plan:sub.plan||'starter',trialEndsAt:newExpiry,updatedAt:new Date().toISOString()},{merge:true});
     await setDoc(doc(db,'paymentSubmissions',subId),{status:'approved',approvedBy:_uid,approvedAt:new Date().toISOString()},{merge:true});
     await logPlatformAction('PAYMENT_APPROVED',`${subId} for ${sub.companyId}`);
@@ -388,7 +442,7 @@ window.loadSASystemSettings=async function(){
 window.saSaveSystemSettings=async function(){
   const g=id=>document.getElementById(id)?.value||'';
   try{
-    const cfg={trialDays:parseInt(g('sysTrialDays'))||14,supportWhatsapp:g('sysSupportWa').replace(/[^0-9]/g,''),updatedAt:new Date().toISOString()};
+    const cfg={trialDays:parseInt(g('sysTrialDays'))||14,supportWhatsapp:g('sysSupportWa').replace(/[^0-9]/g,''),starterPrice:parseInt(g('sysPriceStarter'))||2000,businessPrice:parseInt(g('sysPriceBusiness'))||5000,easypaisaDetails:g('sysEasypaisa').slice(0,200),jazzcashDetails:g('sysJazzcash').slice(0,200),bankDetails:g('sysBank').slice(0,400),updatedAt:new Date().toISOString()};
     await setDoc(doc(db,'platform','config'),cfg,{merge:true});
     await logPlatformAction('SYSTEM_SETTINGS_UPDATED',JSON.stringify(cfg));
     window.SA_CONFIG=cfg;

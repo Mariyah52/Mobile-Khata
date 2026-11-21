@@ -303,6 +303,24 @@ function genDocNum(typePrefix,commit){
   if(commit)localStorage.setItem(key,next);
   return `${displayPrefix}-${next}-${yy}`;
 }
+// Reserve the next document number from the server-side counter at the moment
+// of a real save. If another device took the previewed number meanwhile, the
+// document is quietly given the next free one (and the user is told).
+async function reserveNumberFor(typePrefix,doc2){
+  const m=String(doc2.number||'').match(/-(\d+)-(\d+)$/);
+  const previewN=m?parseInt(m[1]):null;
+  const floor=previewN!==null?previewN-1:0;
+  let n=null;
+  try{n=window.reserveDocNumber?await window.reserveDocNumber(typePrefix,floor):null;}catch{n=null;}
+  if(n===null){genDocNum(typePrefix,true);return;} // offline / demo: local counter as before
+  localStorage.setItem('mk_cnt_'+typePrefix,n);
+  if(previewN!==null&&n!==previewN){
+    const yy=String(new Date().getFullYear()).slice(-2);
+    const displayPrefix=(getBrand().docPrefix||typePrefix).toUpperCase();
+    doc2.number=`${displayPrefix}-${n}-${yy}`;
+    toast('ℹ️ Number '+doc2.number+' assigned (the previous number was just used on another device)');
+  }
+}
 function genId(prefix){
   // For docs use custom numbering; for parties/products/payments use random.
   // 'PMT' deliberately excluded — payments have no displayed sequential
@@ -1537,7 +1555,7 @@ async function saveForm(type){
   const old=db[key]?.find(x=>x.id===doc2.id);
   // Only now (a real save) do we consume/advance the document number counter —
   // merely opening the form to preview a number must not skip one.
-  if(!old){const pfx={Quotation:'QT',Challan:'DC',Invoice:'INV',SalesTaxInvoice:'STI',CommercialBill:'CB'}[type];if(pfx)genDocNum(pfx,true);}
+  if(!old){const pfx={Quotation:'QT',Challan:'DC',Invoice:'INV',SalesTaxInvoice:'STI',CommercialBill:'CB'}[type];if(pfx)await reserveNumberFor(pfx,doc2);}
   // FIX #4: centralized stock handling with reverse support
   handleStockChange(key, doc2, old);
   const ok=await window.FSAVE(key,doc2);
@@ -1665,7 +1683,7 @@ async function savePO(){
   const{subtotal,discountAmt,taxAmt,total}=calcDoc(rows,tax,disc);const ns=g('fStatus');
   const doc2={id:g('fId'),number:g('fNum'),grnNo:g('fGrn')||genId('GRN'),date:g('fDate'),expectedDelivery:g('fDue'),receivedDate:g('fRecDate'),supplierName:cleanText(g('fSuppName')),supplierAddress:cleanText(g('fSuppAddr')),supplierPhone:cleanText(g('fSuppPhone')),supplierNTN:cleanText(g('fSuppNTN')),taxRate:tax,discount:disc,status:ns,notes:cleanText(g('fNotes')),items:rows.map(r=>({...r,description:cleanText(r.description)})),subtotal,discountAmt,taxAmt,total,updatedAt:new Date().toISOString()};
   const old=db.purchases?.find(x=>x.id===doc2.id);
-  if(!old)genDocNum('PO',true);
+  if(!old)await reserveNumberFor('PO',doc2);
   handleStockChange('purchases', doc2, old);
   const ok=await window.FSAVE('purchases',doc2);
   if(!ok){ handleStockChange('purchases', old||{status:'__none__'}, doc2); return; }
@@ -2058,16 +2076,16 @@ function renderSAPayments(){
     ${list.length===0?`<div class="card" style="text-align:center;padding:40px 20px;">
       <div style="font-size:32px;margin-bottom:8px;">📭</div>
       <div style="font-weight:700;color:var(--ink);margin-bottom:6px;">No payment submissions yet</div>
-      <p style="font-size:12px;color:var(--muted);max-width:480px;margin:0 auto;">This page reviews and approves manual payments (EasyPaisa/Bank Transfer) once a company submits one. The customer-facing "Submit Payment" form isn't built yet — this is the review side, ready for when it is.</p>
+      <p style="font-size:12px;color:var(--muted);max-width:480px;margin:0 auto;">This page reviews and approves manual payments (EasyPaisa/Bank Transfer) once a company submits one. Companies submit payments from Company Settings → Billing — this is the review side, ready for when it is.</p>
     </div>`:`
     <div class="card" style="padding:0;overflow:hidden;">
     <div class="tw"><table><thead><tr><th>COMPANY</th><th>AMOUNT</th><th>METHOD</th><th>TXN ID</th><th>DATE</th><th>STATUS</th><th>ACTIONS</th></tr></thead>
     <tbody>${list.map(p=>`<tr>
-      <td style="font-weight:700;">${esc(p.companyId||'')}</td>
+      <td style="font-weight:700;">${esc(p.companyName||p.companyId||'')}<div style="font-size:10px;color:var(--muted);font-weight:400;">${esc(p.plan||'')} · ${esc(p.submittedByEmail||'')}${p.note?' · '+esc(p.note):''}</div></td>
       <td>${fmt(p.amount||0)}</td>
       <td>${esc(p.method||'')}</td>
       <td style="font-size:11px;">${esc(p.transactionId||'')}</td>
-      <td style="font-size:11px;">${p.paymentDate?fmtD(p.paymentDate):'—'}</td>
+      <td style="font-size:11px;">${(p.paymentDate||p.createdAt)?fmtD(String(p.paymentDate||p.createdAt).slice(0,10)):'—'}</td>
       <td><span class="bdg" style="background:${SA_STATUS_COLOR[p.status]||'var(--muted)'};color:var(--on-primary);">${esc(p.status||'')}</span></td>
       <td>${p.status==='pending'?`<button class="btn bp bs" onclick="saApprovePayment('${p.id}')">Approve</button> <button class="btn bd bs" onclick="saRejectPayment('${p.id}')">Reject</button>`:'—'}</td>
     </tr>`).join('')}</tbody></table></div>
@@ -2176,6 +2194,15 @@ function renderSASystemSettings(){
       <div class="ct">Registration</div>
       <div class="fld"><label class="lbl">Free Trial Length (days)</label><input class="inp" id="sysTrialDays" type="number" min="1" value="${cfg.trialDays||14}" style="max-width:160px;"></div>
       <p style="font-size:11px;color:var(--muted);margin-bottom:14px;">Applies to companies registering from now on — doesn't change existing companies' trial dates.</p>
+      <div class="ct">Subscription pricing (PKR / month)</div>
+      <div class="g2">
+        <div class="fld"><label class="lbl">Starter</label><input class="inp" id="sysPriceStarter" type="number" min="0" value="${cfg.starterPrice||2000}"></div>
+        <div class="fld"><label class="lbl">Business</label><input class="inp" id="sysPriceBusiness" type="number" min="0" value="${cfg.businessPrice||5000}"></div>
+      </div>
+      <div class="ct">Where customers send payment</div>
+      <div class="fld"><label class="lbl">EasyPaisa number / account title</label><input class="inp" id="sysEasypaisa" value="${esc(cfg.easypaisaDetails||'')}" placeholder="e.g. 03xx-xxxxxxx — Account title"></div>
+      <div class="fld"><label class="lbl">JazzCash number / account title</label><input class="inp" id="sysJazzcash" value="${esc(cfg.jazzcashDetails||'')}" placeholder="e.g. 03xx-xxxxxxx — Account title"></div>
+      <div class="fld"><label class="lbl">Bank account details</label><textarea class="inp" id="sysBank" placeholder="Bank, account title, IBAN">${esc(cfg.bankDetails||'')}</textarea></div>
       <div class="ct">Support</div>
       <div class="fld"><label class="lbl">Support WhatsApp Number</label><input class="inp" id="sysSupportWa" value="${esc(cfg.supportWhatsapp||SUPPORT_WHATSAPP_NUMBER)}" placeholder="Country code + number, no + or spaces" style="max-width:280px;"></div>
       <button class="btn bp" onclick="saSaveSystemSettings()">💾 Save System Settings</button>
@@ -2689,11 +2716,55 @@ function renderBillingTab(){
       <div>${planLimits().blockedModules.length===0?'✅ All modules included (Sales Tax, Commercial Bill, Bank)':`🔒 Not included: ${planLimits().blockedModules.map(m=>({salestax:'Sales Tax Invoice',commercial:'Commercial Bill',bank:'Bank Accounts'}[m]||m)).join(', ')} — upgrade to unlock`}</div>
     </div>
   </div>
-  <div class="card">
-    <div class="ct">📈 Upgrade / Manage Subscription</div>
-    <p style="font-size:13px;color:var(--muted);margin-bottom:14px;">To upgrade your plan or make a payment, contact your platform provider directly — self-service payment submission isn't available in this version yet.</p>
-    <button class="btn bp" onclick="openWhatsAppHelp()">💬 Contact Support to Upgrade</button>
+  ${renderPaymentSubmitCard()}`;
+}
+
+// ── Self-service subscription payment (manual EasyPaisa / JazzCash / bank) ──
+function renderPaymentSubmitCard(){
+  if(window.MY_PAYMENTS===undefined){window.MY_PAYMENTS=null;window.loadMyPayments&&window.loadMyPayments();}
+  const cfg=window.BILLING_CFG||window.PLATFORM_CONFIG||{};
+  const price={starter:cfg.starterPrice||2000,business:cfg.businessPrice||5000};
+  const canPay=['owner','admin'].includes(myRole());
+  const how=[cfg.easypaisaDetails&&`<div>📱 <strong>EasyPaisa:</strong> ${esc(cfg.easypaisaDetails)}</div>`,cfg.jazzcashDetails&&`<div>📱 <strong>JazzCash:</strong> ${esc(cfg.jazzcashDetails)}</div>`,cfg.bankDetails&&`<div>🏦 <strong>Bank:</strong> ${esc(cfg.bankDetails)}</div>`].filter(Boolean).join('');
+  const hist=(window.MY_PAYMENTS||[]);
+  const stColor={pending:'var(--ink-gold)',approved:'var(--ink-green)',rejected:'var(--ink-red)'};
+  return `<div class="card">
+    <div class="ct">📈 Upgrade / Pay for Subscription</div>
+    ${how?`<div style="background:var(--light);border-radius:10px;padding:12px 14px;font-size:13px;line-height:1.7;margin-bottom:12px;">
+      <div style="font-weight:700;margin-bottom:4px;">1. Send the payment to:</div>${how}</div>`
+      :`<p style="font-size:13px;color:var(--muted);margin-bottom:12px;">Payment details are not set up yet. Please contact support to get them.</p>`}
+    ${canPay?`<div style="font-weight:700;font-size:13px;margin-bottom:6px;">2. Then submit the transaction ID here:</div>
+    <div class="g2">
+      <div class="fld"><label class="lbl">Plan</label><select class="inp" id="payPlan" onchange="document.getElementById('payAmt').value=({starter:${price.starter},business:${price.business}})[this.value]">
+        <option value="starter">Starter — PKR ${fmt(price.starter)}/month</option><option value="business">Business — PKR ${fmt(price.business)}/month</option></select></div>
+      <div class="fld"><label class="lbl">Amount paid (PKR)</label><input class="inp" id="payAmt" type="number" min="1" value="${price.starter}"></div>
+      <div class="fld"><label class="lbl">Paid via</label><select class="inp" id="payMethod"><option>EasyPaisa</option><option>JazzCash</option><option>Bank Transfer</option></select></div>
+      <div class="fld"><label class="lbl">Transaction ID *</label><input class="inp" id="payTxn" placeholder="From the payment SMS / receipt"></div>
+    </div>
+    <div class="fld"><label class="lbl">Note (optional)</label><input class="inp" id="payNote" maxlength="300" placeholder="Sender name or number"></div>
+    <button class="btn bp" id="payBtn" onclick="submitPayment()">📤 Submit Payment</button>
+    <p style="font-size:11px;color:var(--muted);margin-top:8px;">Your plan is activated after the payment is checked (usually within one working day). Each transaction ID can be submitted only once.</p>`
+    :`<p style="font-size:13px;color:var(--muted);">Only the company Owner or Admin can submit a payment.</p>`}
+    ${hist.length?`<div style="font-weight:700;font-size:13px;margin:16px 0 6px;">Your payment history</div>
+    <div class="tw"><table><thead><tr><th>DATE</th><th>PLAN</th><th>AMOUNT</th><th>TXN ID</th><th>STATUS</th></tr></thead><tbody>${hist.map(p=>`<tr>
+      <td style="font-size:11px;">${fmtD(String(p.createdAt||'').slice(0,10))}</td><td>${esc(PLAN_LABELS[p.plan]||p.plan||'')}</td><td>${fmt(p.amount||0)}</td>
+      <td style="font-size:11px;">${esc(p.transactionId||'')}</td>
+      <td><span style="font-weight:700;color:${stColor[p.status]||'var(--muted)'};text-transform:capitalize;">${esc(p.status||'')}</span>${p.status==='rejected'&&p.rejectionReason?`<div style="font-size:10px;color:var(--muted);">${esc(p.rejectionReason)}</div>`:''}</td></tr>`).join('')}</tbody></table></div>`:''}
+    <button class="btn bg" style="margin-top:12px;" onclick="openWhatsAppHelp()">💬 Need help? Contact Support</button>
   </div>`;
+}
+async function submitPayment(){
+  if(!['owner','admin'].includes(myRole()))return toast('⛔ Only Owner/Admin can submit a payment');
+  const g=id=>document.getElementById(id)?.value||'';
+  const amount=parseFloat(g('payAmt'))||0, txn=g('payTxn').trim();
+  if(amount<=0)return toast('⚠️ Enter the amount you paid');
+  if(txn.replace(/[^a-zA-Z0-9]/g,'').length<6)return toast('⚠️ Enter the transaction ID (at least 6 letters/numbers)');
+  const btn=document.getElementById('payBtn');if(btn){btn.disabled=true;btn.textContent='Submitting…';}
+  const r=await window.submitPaymentProof({plan:g('payPlan'),amount,method:g('payMethod'),transactionId:txn,note:cleanText(g('payNote'))});
+  if(btn){btn.disabled=false;btn.textContent='📤 Submit Payment';}
+  if(!r.ok)return toast('❌ '+r.error);
+  toast('✅ Payment submitted — we will activate your plan after checking it');
+  window.MY_PAYMENTS=undefined;renderApp();
 }
 
 function renderTeamTab(){
@@ -3193,12 +3264,13 @@ async function confirmVoiceCommand(){
     const items=[{description:match?match.name:p.product,unit:match?match.unit:'',qty:p.qty,rate}];
     const{subtotal,discountAmt,taxAmt,total}=calcDoc(items,0,0);
     const prefix=p.docType==='Quotation'?'QT':'INV';
-    const number=genDocNum(prefix,true);
+    const number=genDocNum(prefix);
     const uid=(typeof crypto!=='undefined'&&crypto.randomUUID)?crypto.randomUUID().replace(/-/g,'').slice(0,8).toUpperCase():Math.random().toString(36).slice(2,10).toUpperCase();
     const doc2={id:`${prefix}-${uid}`,number,type:p.docType,date:today(),status:p.docType==='Quotation'?'Draft':'Unpaid',
       taxRate:0,discount:0,notes:'',customerName:p.customer,customerAddress:'',customerPhone:'',customerNTN:'',
       items,subtotal,discountAmt,taxAmt,total,updatedAt:new Date().toISOString()};
     const key=p.docType==='Quotation'?'quotations':'invoices';
+    await reserveNumberFor(prefix,doc2);
     const saved=await window.FSAVE(key,doc2);
     if(!saved){closeMod();return;}
     addAudit('CREATE',key,doc2.number,`Voice command: ${fmt(total)}`);
