@@ -175,6 +175,9 @@
         <div id="adminMenu" class="admin-dropdown" style="display:none;"></div>
       </div>
       <button id="installAppBtn" class="btn bg bs" onclick="installApp()" style="display:none;color:var(--on-primary);background:var(--green);" title="Install Mobile Khata as an app">⬇️ Install App</button>
+      <select id="appLang" class="btn bg bs" data-notr onchange="setLang(this.value)" title="Language" style="color:var(--on-primary);background:rgba(255,255,255,.55);cursor:pointer;">
+        <option value="en">English</option><option value="roman">Roman Urdu</option><option value="ur">اردو</option>
+      </select>
       <button class="btn bg bs" onclick="doSignOut()" style="color:var(--on-primary);background:rgba(255,255,255,.55);">Sign Out</button>
     </div>
   </div>
@@ -189,5 +192,6 @@
 <!-- MAIN APP -->
 <script src="js/app.js"></script>
 <script src="js/extras.js"></script>
+<script src="js/i18n.js"></script>
 </body>
 </html>

@@ -237,3 +237,8 @@ tbody tr:hover{ background:var(--light); }
 
 /* FIX #3: Challan items - red line then items right below */
 .challan-items-wrap{ margin-top:0; }
+
+/* Urdu script: readable Naskh fonts; layout direction is unchanged */
+.lang-ur, .lang-ur button, .lang-ur input, .lang-ur select, .lang-ur textarea{font-family:'Noto Naskh Arabic','Segoe UI',Tahoma,sans-serif;}
+.lang-ur .nav-tab{line-height:1.6;}
+.lang-ur *{unicode-bidi:plaintext;}
