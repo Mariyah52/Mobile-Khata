@@ -1,5 +1,23 @@
 # Multi-Tenant SaaS — Deployment Guide & Migration Status
 
+## Update (Nov 2026): what is now done
+
+- **Super Admin portal + payment approval** — built (Companies, Payments, Subscriptions, Revenue, System Settings).
+- **Self-service payment submission** — Company Settings → Billing: pick a plan, pay by EasyPaisa / JazzCash / bank, submit the transaction ID.
+  The transaction ID is the document ID, so it can only be submitted once (enforced in `firestore.rules`). Set prices and where customers
+  should send money in Super Admin → System Settings.
+- **Language** — English / Roman Urdu / Urdu for the whole app (`public/js/i18n.js`, selector in the header). Texts not in the dictionary stay English.
+- **Document numbering** — now reserved from a per-company counter inside a Firestore transaction (`companies/{id}/counters/{prefix}`),
+  so two devices can no longer get the same number. Offline, it falls back to the local counter as before.
+- **Rules tests** — `firestore.rules.test.js` now also covers counters and payment submissions and runs automatically on GitHub
+  (Actions → "Firestore rules test"). **Check that this run is green before relying on the rules.**
+- **Code layout** — `public/index.html` is now just the page; styles are in `public/css/app.css`, scripts in `public/js/`.
+
+Still open: expiry email reminders (needs a scheduled Cloud Function), help/FAQ system, image optimisation.
+
+---
+
+
 This covers what changed in `index.html` in this pass, how to deploy it, and
 what's still outstanding against the full master-prompt spec.
 

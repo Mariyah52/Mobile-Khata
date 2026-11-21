@@ -284,3 +284,125 @@ describe('super admin allowlist', () => {
     await assertFails(db.doc('superadmins/anyone').set({ addedAt: new Date().toISOString() }));
   });
 });
+
+
+// ═══ DOCUMENT NUMBER COUNTERS (collision-safe numbering) ═══
+describe('document number counters', () => {
+  beforeEach(async () => seedCompany(COMPANY_A));
+  const ref = (db, prefix = 'INV') => db.doc(`companies/${COMPANY_A}/counters/${prefix}`);
+  const val = (n) => ({ n, updatedAt: new Date().toISOString() });
+
+  it('a sales user can start and advance a counter', async () => {
+    const db = asUser(`${COMPANY_A}-sales`);
+    await assertSucceeds(ref(db).set(val(1006)));
+    await assertSucceeds(ref(db).set(val(1007)));
+  });
+
+  it('a counter can never go backwards or stay the same', async () => {
+    const db = asUser(`${COMPANY_A}-sales`);
+    await assertSucceeds(ref(db).set(val(1010)));
+    await assertFails(ref(db).set(val(1009)));
+    await assertFails(ref(db).set(val(1010)));
+  });
+
+  it('a viewer cannot advance a counter', async () => {
+    await assertFails(ref(asUser(`${COMPANY_A}-viewer`)).set(val(5)));
+  });
+
+  it('a member of another company cannot touch this company\u2019s counters', async () => {
+    await seedCompany(COMPANY_B);
+    await assertFails(ref(asUser(`${COMPANY_B}-owner`)).set(val(5)));
+  });
+
+  it('only known document prefixes are accepted', async () => {
+    await assertFails(ref(asUser(`${COMPANY_A}-owner`), 'HACK').set(val(5)));
+  });
+
+  it('a counter holds nothing but the number (no extra fields, integer only)', async () => {
+    const db = asUser(`${COMPANY_A}-owner`);
+    await assertFails(ref(db).set({ ...val(5), extra: 'x' }));
+    await assertFails(ref(db).set(val(5.5)));
+    await assertFails(ref(db).set(val('6')));
+  });
+
+  it('counters cannot be advanced once the company is expired (read-only)', async () => {
+    await testEnv.clearFirestore();
+    await seedCompany(COMPANY_A, { status: 'expired' });
+    await assertFails(ref(asUser(`${COMPANY_A}-owner`)).set(val(5)));
+  });
+
+  it('counters can be read by members and cannot be deleted', async () => {
+    const db = asUser(`${COMPANY_A}-owner`);
+    await assertSucceeds(ref(db).set(val(3)));
+    await assertSucceeds(ref(asUser(`${COMPANY_A}-viewer`)).get());
+    await assertFails(ref(db).delete());
+  });
+});
+
+// ═══ SUBSCRIPTION PAYMENT SUBMISSIONS ═══
+describe('payment submissions', () => {
+  beforeEach(async () => {
+    await seedCompany(COMPANY_A);
+    await seedCompany(COMPANY_B);
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await ctx.firestore().doc('superadmins/sa1').set({ addedAt: 'now' });
+    });
+  });
+  const sub = (companyId, uid, txn = 'TX12345678', extra = {}) => ({
+    companyId, companyName: 'Test Co', plan: 'starter', amount: 2000, method: 'EasyPaisa',
+    transactionId: txn, txnKey: 'txn_' + txn.toLowerCase().replace(/[^a-z0-9]/g, ''), note: '',
+    status: 'pending', submittedBy: uid, submittedByEmail: 'o@test.com', createdAt: new Date().toISOString(), ...extra,
+  });
+  const key = (txn = 'TX12345678') => 'txn_' + txn.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+  it('a member can submit a valid pending payment for their own company', async () => {
+    const uid = `${COMPANY_A}-owner`;
+    await assertSucceeds(asUser(uid).doc(`paymentSubmissions/${key()}`).set(sub(COMPANY_A, uid)));
+  });
+
+  it('the same transaction ID cannot be submitted twice (even by another company)', async () => {
+    const a = `${COMPANY_A}-owner`, b = `${COMPANY_B}-owner`;
+    await assertSucceeds(asUser(a).doc(`paymentSubmissions/${key()}`).set(sub(COMPANY_A, a)));
+    await assertFails(asUser(a).doc(`paymentSubmissions/${key()}`).set(sub(COMPANY_A, a)));
+    await assertFails(asUser(b).doc(`paymentSubmissions/${key()}`).set(sub(COMPANY_B, b)));
+  });
+
+  it('cannot submit for a company you do not belong to', async () => {
+    const b = `${COMPANY_B}-owner`;
+    await assertFails(asUser(b).doc(`paymentSubmissions/${key()}`).set(sub(COMPANY_A, b)));
+  });
+
+  it('cannot submit as already approved, or with a mismatched document ID', async () => {
+    const uid = `${COMPANY_A}-owner`;
+    await assertFails(asUser(uid).doc(`paymentSubmissions/${key()}`).set(sub(COMPANY_A, uid, 'TX12345678', { status: 'approved' })));
+    await assertFails(asUser(uid).doc('paymentSubmissions/txn_somethingelse1').set(sub(COMPANY_A, uid)));
+  });
+
+  it('rejects bad amounts, unknown plans, unknown methods and extra fields', async () => {
+    const uid = `${COMPANY_A}-owner`;
+    const d = (extra, txn = 'TX99999999') => asUser(uid).doc(`paymentSubmissions/${key(txn)}`).set(sub(COMPANY_A, uid, txn, extra));
+    await assertFails(d({ amount: 0 }));
+    await assertFails(d({ amount: '2000' }));
+    await assertFails(d({ plan: 'enterprise' }));
+    await assertFails(d({ method: 'Bitcoin' }));
+    await assertFails(d({ isAdminApproved: true }));
+  });
+
+  it('a company can read only its own submissions', async () => {
+    const a = `${COMPANY_A}-owner`, b = `${COMPANY_B}-owner`;
+    await assertSucceeds(asUser(a).doc(`paymentSubmissions/${key()}`).set(sub(COMPANY_A, a)));
+    await assertSucceeds(asUser(a).doc(`paymentSubmissions/${key()}`).get());
+    await assertFails(asUser(b).doc(`paymentSubmissions/${key()}`).get());
+  });
+
+  it('a company cannot approve its own payment; only Super Admin can', async () => {
+    const a = `${COMPANY_A}-owner`;
+    await assertSucceeds(asUser(a).doc(`paymentSubmissions/${key()}`).set(sub(COMPANY_A, a)));
+    await assertFails(asUser(a).doc(`paymentSubmissions/${key()}`).set({ status: 'approved' }, { merge: true }));
+    await assertSucceeds(asUser('sa1').doc(`paymentSubmissions/${key()}`).set({ status: 'approved' }, { merge: true }));
+  });
+
+  it('a company cannot activate its own subscription by editing the company document', async () => {
+    await assertFails(asUser(`${COMPANY_A}-owner`).doc(`companies/${COMPANY_A}`).set({ status: 'active', plan: 'business' }, { merge: true }));
+  });
+});
