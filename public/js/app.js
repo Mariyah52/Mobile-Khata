@@ -1780,7 +1780,7 @@ function renderDash(){
   // Commercial Bills (common for FBR-registered businesses) still has real sales.
   const allSalesDocs=[...inv,...(db.salestaxinvoices||[]),...(db.commercialbills||[])];
   const tSales=allSalesDocs.reduce((s,i)=>s+docBase(i),0);
-  const tPaid=pmts.filter(p=>p.type==='received').reduce((s,p)=>s+(+p.amount||0),0);
+  const tPaid=pmts.filter(p=>p.type==='received').reduce((s,p)=>s+(+p.amount||0),0)+unrecordedReceivedSales();
   const unpaid=allSalesDocs.filter(i=>i.status==='Unpaid');
   const tPend=unpaid.reduce((s,i)=>s+docBase(i),0);
   const pDel=chal.filter(c=>c.status==='Pending'||c.status==='Dispatched').length;
@@ -1840,13 +1840,16 @@ async function saveProd(){if(!requirePerm('products','write'))return;if(!vReq('p
 // ═══ PAYMENTS ═══
 // One-click fix for documents saved BEFORE the payment-sync feature existed — recalculates
 // paidAmount/status for every Invoice/STI/Commercial Bill/Purchase from the payments on file.
-function resyncAllPayments(){
+async function resyncAllPayments(){
   const db=window.DB||STATE;
-  let n=0;
-  ['invoices','salestaxinvoices','commercialbills','purchases'].forEach(colKey=>{
-    (db[colKey]||[]).forEach(d=>{syncPaymentToDoc(colKey,d.id);n++;});
-  });
-  toast(`✅ Re-synced ${n} documents with payments!`);
+  let updated=0,skipped=0;
+  for(const colKey of ['invoices','salestaxinvoices','commercialbills','purchases']){
+    for(const d of (db[colKey]||[])){
+      const r=await syncPaymentToDoc(colKey,d.id,{bulk:true});
+      if(r==='updated')updated++;else skipped++;
+    }
+  }
+  toast(`✅ Resync done: ${updated} updated, ${skipped} left unchanged (no payments recorded or already correct).`,4500);
   renderApp();
 }
 // Candidate documents a payment can be linked to, based on payment type.
@@ -1871,17 +1874,76 @@ function getPaidSoFar(docType,doc2){
 }
 // Write the up-to-date paid amount & status back onto the source Invoice/PO so
 // Dashboard, Ledger and the document list all stay in sync the moment a payment changes.
-async function syncPaymentToDoc(docType,docId){
-  if(!docType||!docId)return;
+async function syncPaymentToDoc(docType,docId,opts){
+  if(!docType||!docId)return 'skipped';
+  const bulk=!!(opts&&opts.bulk);
   const db=window.DB||STATE;
   const doc2=(db[docType]||[]).find(x=>x.id===docId);
-  if(!doc2){toast('⚠️ Payment saved, but the linked document could not be found to update its paid status — try "🔄 Resync" on the Payments page.');return;}
+  if(!doc2){toast('⚠️ Payment saved, but the linked document could not be found to update its paid status — try "🔄 Resync" on the Payments page.');return 'skipped';}
   const paid=getPaidSoFar(docType,doc2);
   const total=+doc2.total||0;
+  // Bulk Resync must never wipe a stored paidAmount just because no payment records exist
+  // (e.g. data imported without its payments). Only single-payment changes may lower it.
+  if(bulk&&paid===0)return 'skipped';
   const updated={...doc2,paidAmount:paid};
   if(paid>0)updated.status=(total>0&&paid>=total)?'Paid':(docType==='purchases'?doc2.status:'Partial');
+  if(bulk&&updated.paidAmount===(+doc2.paidAmount||0)&&updated.status===doc2.status)return 'skipped';
   const ok=await window.FSAVE(docType,updated);
-  if(!ok)toast('⚠️ Payment saved, but updating the linked document\'s paid status failed — try "🔄 Resync" on the Payments page.');
+  if(!ok){toast('⚠️ Payment saved, but updating the linked document\'s paid status failed — try "🔄 Resync" on the Payments page.');return 'failed';}
+  return 'updated';
+}
+// Invoices/POs marked "Paid" that have no payment record behind them (e.g. migrated data).
+function findPaidWithoutPayments(){
+  const db=window.DB||STATE;
+  const out=[];
+  [['invoices','received'],['salestaxinvoices','received'],['commercialbills','received'],['purchases','paid']].forEach(([colKey,kind])=>{
+    (db[colKey]||[]).forEach(d=>{
+      if(d.status==='Paid'&&(+d.total||0)>0&&getPaidSoFar(colKey,d)===0)out.push({colKey,kind,d});
+    });
+  });
+  return out;
+}
+// Sales already marked Paid/Partial but with no payment records — lets the Dashboard still show them as received.
+function unrecordedReceivedSales(){
+  const db=window.DB||STATE;
+  let sum=0;
+  ['invoices','salestaxinvoices','commercialbills'].forEach(colKey=>{
+    (db[colKey]||[]).forEach(d=>{
+      if(getPaidSoFar(colKey,d)!==0)return;
+      if(d.status==='Paid')sum+=docBase(d);
+      else if(d.status==='Partial')sum+=(+d.paidAmount||0);
+    });
+  });
+  return sum;
+}
+function openRepairPaid(){
+  if(!requirePerm('payments','write'))return;
+  const rows=findPaidWithoutPayments();
+  if(!rows.length){toast('✅ Nothing to repair — every Paid document already has a payment record.');return;}
+  window._repairRows=rows;
+  const tot=rows.reduce((s,r)=>s+(+r.d.total||0),0);
+  openMod(`<div class="mh"><div class="mt">🛠️ Repair "Paid" documents</div><button class="btn bg bs" onclick="closeMod()">✕</button></div>
+  <p style="font-size:13px;margin-bottom:10px;">These ${rows.length} documents are marked <strong>Paid</strong> but have no payment record. Saving will create one payment record for the full amount on the document date (method: Other) and set its paid amount. Nothing is deleted.</p>
+  <div class="tw" style="max-height:300px;overflow:auto;"><table><thead><tr><th>NUMBER</th><th>PARTY</th><th>DATE</th><th>TYPE</th><th>AMOUNT</th></tr></thead><tbody>${rows.map(r=>`<tr><td style="font-weight:700;">${esc(r.d.number||'')}</td><td>${esc(cleanText(r.d.customerName||r.d.supplierName||'—'))}</td><td>${fmtD(r.d.date)}</td><td>${r.kind==='received'?'Received':'Paid Out'}</td><td style="text-align:right;font-weight:700;">${fmt(r.d.total)}</td></tr>`).join('')}</tbody></table></div>
+  <div style="margin-top:8px;font-weight:700;">Total: ${fmt(tot)}</div>
+  <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;"><button class="btn bg" onclick="closeMod()">Cancel</button><button class="btn bp" onclick="runRepairPaid()">💾 Create ${rows.length} payment records</button></div>`);
+}
+async function runRepairPaid(){
+  if(!requirePerm('payments','write'))return;
+  const rows=window._repairRows||[];
+  let ok=0,fail=0;
+  for(const {colKey,kind,d} of rows){
+    const total=+d.total||0;
+    const p={id:genId('PMT'),type:kind,date:d.date||today(),amount:total,partyName:cleanText(d.customerName||d.supplierName||''),invoiceRef:d.number||'',docType:colKey,docId:d.id,method:'Other',notes:'Auto-created from Paid status (repair)',updatedAt:new Date().toISOString()};
+    const saved=await window.FSAVE('payments',p);
+    if(!saved){fail++;continue;}
+    const done=await window.FSAVE(colKey,{...d,paidAmount:total,status:'Paid'});
+    if(done)ok++;else fail++;
+  }
+  window._repairRows=null;
+  addAudit('REPAIR','payments',`${ok} created`,fail?`${fail} failed`:'');
+  toast(fail?`⚠️ ${ok} repaired, ${fail} failed — run it again to retry.`:`✅ ${ok} payment records created.`,4500);
+  closeMod();renderApp();
 }
 function refreshPmtRefOptions(){
   const type=document.getElementById('pmtType')?.value||'received';
@@ -1914,7 +1976,7 @@ function autoFillPmtFromRef(){
   if(amtEl)amtEl.value=Math.max((+d.total||0)-getPaidSoFar(docType,d),0);
 }
 function deletePayment(id){if(!canDelete()){toast('⛔ Only Owner/Admin can delete');return;}const db=window.DB||STATE;const p=(db.payments||[]).find(x=>x.id===id);window.FDEL('payments',id);if(p&&p.docType&&p.docId)syncPaymentToDoc(p.docType,p.docId);renderApp();}
-function renderPayments(){const db=window.DB||STATE;const pmts=db.payments||[];const canCreate=canWrite('payments');const tIn=pmts.filter(p=>p.type==='received').reduce((s,p)=>s+(+p.amount||0),0);const tOut=pmts.filter(p=>p.type==='paid').reduce((s,p)=>s+(+p.amount||0),0);return`<div class="page"><div class="ph"><div><div class="pt">💰 Payments</div></div><div style="display:flex;gap:6px;">${canCreate?`<button class="btn bp bl" onclick="openPmtForm()">+ Record Payment</button>`:''}<button class="btn bo bl" title="Recalculate every Invoice/PO's paid amount from all recorded payments" onclick="resyncAllPayments()">🔄 Resync</button></div></div><div class="g2" style="margin-bottom:14px;"><div class="stat" style="background:var(--green);"><div class="sn" style="font-size:18px;">${fmt(tIn)}</div><div class="sl">Total Received</div></div><div class="stat" style="background:var(--red);"><div class="sn" style="font-size:18px;">${fmt(tOut)}</div><div class="sl">Total Paid Out</div></div></div><div class="card" style="padding:0;overflow:hidden;">${pmts.length===0?`<div class="empty"><div class="ei">💳</div><p>No payments yet.</p></div>`:`<div class="tw"><table><thead><tr><th>DATE</th><th>TYPE</th><th>PARTY</th><th>INVOICE REF</th><th>METHOD</th><th>AMOUNT</th><th></th></tr></thead><tbody>${[...pmts].sort((a,b)=>new Date(b.date)-new Date(a.date)).map(p=>`<tr><td>${fmtD(p.date)}</td><td><span class="bdg bg-${p.type==='received'?'green':'red'}">${p.type==='received'?'Received':'Paid Out'}</span></td><td style="font-weight:700;">${esc(cleanText(p.partyName||''))}</td><td>${p.invoiceRef?esc(p.invoiceRef):'<span style="color:var(--muted);">General Payment</span>'}</td><td>${esc(p.method||'Cash')}</td><td style="font-weight:700;text-align:right;color:${p.type==='received'?'var(--ink-green)':'var(--ink-red)'};">${fmt(p.amount)}</td><td><button class="btn bd bs" title="Delete" onclick="if(confirm('Delete?'))deletePayment('${p.id}')">🗑️</button></td></tr>`).join('')}</tbody></table></div>`}</div></div>`;}
+function renderPayments(){const db=window.DB||STATE;const pmts=db.payments||[];const canCreate=canWrite('payments');const tIn=pmts.filter(p=>p.type==='received').reduce((s,p)=>s+(+p.amount||0),0);const tOut=pmts.filter(p=>p.type==='paid').reduce((s,p)=>s+(+p.amount||0),0);return`<div class="page"><div class="ph"><div><div class="pt">💰 Payments</div></div><div style="display:flex;gap:6px;">${canCreate?`<button class="btn bp bl" onclick="openPmtForm()">+ Record Payment</button>`:''}${canCreate?`<button class="btn bo bl" title="Create payment records for documents marked Paid that have none" onclick="openRepairPaid()">🛠️ Repair Paid</button>`:''}<button class="btn bo bl" title="Recalculate paid amounts from recorded payments (never lowers a stored amount when no payments exist)" onclick="resyncAllPayments()">🔄 Resync</button></div></div><div class="g2" style="margin-bottom:14px;"><div class="stat" style="background:var(--green);"><div class="sn" style="font-size:18px;">${fmt(tIn)}</div><div class="sl">Total Received</div></div><div class="stat" style="background:var(--red);"><div class="sn" style="font-size:18px;">${fmt(tOut)}</div><div class="sl">Total Paid Out</div></div></div><div class="card" style="padding:0;overflow:hidden;">${pmts.length===0?`<div class="empty"><div class="ei">💳</div><p>No payments yet.</p></div>`:`<div class="tw"><table><thead><tr><th>DATE</th><th>TYPE</th><th>PARTY</th><th>INVOICE REF</th><th>METHOD</th><th>AMOUNT</th><th></th></tr></thead><tbody>${[...pmts].sort((a,b)=>new Date(b.date)-new Date(a.date)).map(p=>`<tr><td>${fmtD(p.date)}</td><td><span class="bdg bg-${p.type==='received'?'green':'red'}">${p.type==='received'?'Received':'Paid Out'}</span></td><td style="font-weight:700;">${esc(cleanText(p.partyName||''))}</td><td>${p.invoiceRef?esc(p.invoiceRef):'<span style="color:var(--muted);">General Payment</span>'}</td><td>${esc(p.method||'Cash')}</td><td style="font-weight:700;text-align:right;color:${p.type==='received'?'var(--ink-green)':'var(--ink-red)'};">${fmt(p.amount)}</td><td><button class="btn bd bs" title="Delete" onclick="if(confirm('Delete?'))deletePayment('${p.id}')">🗑️</button></td></tr>`).join('')}</tbody></table></div>`}</div></div>`;}
 function openPmtForm(){const db=window.DB||STATE;openMod(`<div class="mh"><div class="mt">Record Payment</div><button class="btn bg bs" onclick="closeMod()">✕</button></div><div class="fld"><label class="lbl">Type</label><select class="inp" id="pmtType" onchange="refreshPmtRefOptions()"><option value="received">Payment Received (from Customer)</option><option value="paid">Payment Paid Out (to Supplier)</option></select></div><div class="g2"><div class="fld"><label class="lbl">Date</label><input type="date" class="inp" id="pmtDate" value="${today()}"></div><div class="fld"><label class="lbl">Amount (PKR) *</label><input type="number" class="inp" id="pmtAmt" value="0" min="0"><div class="err" id="ePmt">Enter valid amount.</div></div></div><div class="fld"><label class="lbl">Invoice / PO Reference</label><input list="pmtRef-dl" class="inp" id="pmtRef" placeholder="Type to search — leave blank for a general payment" oninput="autoFillPmtFromRef()"><datalist id="pmtRef-dl"></datalist></div><div class="g2"><div class="fld"><label class="lbl">Party Name</label><input list="pc-dl" class="inp" id="pmtParty" placeholder="Customer / Supplier">${dl('pc-dl',db.customers.map(c=>c.name))}</div><div class="fld"><label class="lbl">Method</label><select class="inp" id="pmtMethod">${['Cash','Bank Transfer','Cheque','Online','Other'].map(m=>`<option>${m}</option>`).join('')}</select></div></div><div class="fld"><label class="lbl">Notes</label><input class="inp" id="pmtNotes"></div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;"><button class="btn bg" onclick="closeMod()">Cancel</button><button class="btn bp" onclick="savePmt()">💾 Save Payment</button></div>`);refreshPmtRefOptions();}
 async function savePmt(){if(!requirePerm('payments','write'))return;const amt=parseFloat(document.getElementById('pmtAmt')?.value)||0;if(amt<=0){const e=document.getElementById('ePmt');if(e)e.classList.add('show');document.getElementById('pmtAmt')?.classList.add('invalid');return toast('⚠️ Enter valid amount!');}const g=id=>document.getElementById(id)?.value||'';const refLabel=g('pmtRef');const mapped=(window._pmtRefMap||{})[refLabel];const[refDocType,refDocId]=mapped?mapped.split('|'):[null,null];const db=window.DB||STATE;const refDoc=refDocId?(db[refDocType]||[]).find(x=>x.id===refDocId):null;const p={id:genId('PMT'),type:g('pmtType'),date:g('pmtDate'),amount:amt,partyName:cleanText(g('pmtParty')),invoiceRef:refDoc?refDoc.number:'',docType:refDocType||'',docId:refDocId||'',method:g('pmtMethod'),notes:cleanText(g('pmtNotes')),updatedAt:new Date().toISOString()};const ok=await window.FSAVE('payments',p);if(!ok)return;await syncPaymentToDoc(refDocType,refDocId);addAudit('SAVE','payments',p.invoiceRef||p.partyName,fmt(amt));toast('✅ Saved!');closeMod();renderApp();}
 
