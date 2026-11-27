@@ -1781,8 +1781,8 @@ function renderDash(){
   const allSalesDocs=[...inv,...(db.salestaxinvoices||[]),...(db.commercialbills||[])];
   const tSales=allSalesDocs.reduce((s,i)=>s+docBase(i),0);
   const tPaid=pmts.filter(p=>p.type==='received').reduce((s,p)=>s+(+p.amount||0),0)+unrecordedReceivedSales();
-  const unpaid=allSalesDocs.filter(i=>i.status==='Unpaid');
-  const tPend=unpaid.reduce((s,i)=>s+docBase(i),0);
+  // Pending = every sale not yet received (Draft/Sent/Unpaid/Partial remainders), so Total Sales = Received + Pending.
+  const tPend=Math.max(tSales-tPaid,0);
   const pDel=chal.filter(c=>c.status==='Pending'||c.status==='Dispatched').length;
   const recent=[...inv.map(d=>({...d,_t:'Invoice'})),...chal.map(d=>({...d,_t:'Challan'})),...quot.map(d=>({...d,_t:'Quotation'})),...(db.salestaxinvoices||[]).map(d=>({...d,_t:'STI'})),...(db.commercialbills||[]).map(d=>({...d,_t:'CB'}))].sort((a,b)=>new Date(b.date)-new Date(a.date)).slice(0,8);
   const low=prods.filter(p=>(+p.stock||0)<=(+p.minStock||5));
